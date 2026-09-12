@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<pre id="out"></pre>
+<script>
+const out = document.getElementById('out');
+const log = s => { out.textContent += s + '\n'; };
+
+log('=== htmlpreview.github.io origin probe ===');
+log('Origin: ' + location.origin);
+log('');
+
+// 1. Cookies on this origin
+log('Cookies: ' + (document.cookie || '(none)'));
+
+// 2. localStorage
+log('localStorage keys: ' + Object.keys(localStorage).join(', ') || '(empty)');
+for (let k of Object.keys(localStorage)) {
+  log('  ' + k + ': ' + localStorage.getItem(k).substring(0, 100));
+}
+
+// 3. sessionStorage
+log('sessionStorage keys: ' + Object.keys(sessionStorage).join(', ') || '(empty)');
+
+// 4. Try fetching github.com with credentials (will fail CORS but note the attempt)
+log('');
+log('Testing github.com API with credentials...');
+fetch('https://api.github.com/user', { credentials: 'include' })
+  .then(r => r.json())
+  .then(d => log('GitHub API response: ' + JSON.stringify(d).substring(0, 200)))
+  .catch(e => log('GitHub API error: ' + e.message));
+
+// 5. Try fetching github.com CSRF token
+fetch('https://github.com/', { credentials: 'include', mode: 'no-cors' })
+  .then(() => log('github.com no-cors fetch: succeeded (opaque response)'))
+  .catch(e => log('github.com no-cors fetch error: ' + e.message));
+
+// 6. Check if we're in an iframe
+log('');
+log('In iframe: ' + (window !== window.top));
+if (window !== window.top) {
+  log('Parent origin: attempting postMessage probe...');
+  window.top.postMessage({type: 'probe', origin: location.origin}, '*');
+}
+
+// 7. IndexedDB
+log('IndexedDB: checking...');
+const req = indexedDB.open('test');
+req.onsuccess = () => { req.result.close(); indexedDB.databases().then(dbs => log('IDB databases: ' + dbs.map(d=>d.name).join(', '))); };
+</script>
+</body></html>
